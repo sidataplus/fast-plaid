@@ -267,7 +267,10 @@ pub fn colbert_score_reduce(token_scores: &Tensor, attention_mask: &Tensor) -> T
     // Padded doc tokens were set to -9999.0 above; zero them out before aggregation.
     let (max_scores_d_to_q, _) = masked_scores.max_dim(2, false);
     let valid_doc_mask = attention_mask.to_kind(Kind::Float);
-    let d_to_q = (max_scores_d_to_q * valid_doc_mask).sum_dim_intlist(-1, false, Kind::Float);
+    let doc_lengths = valid_doc_mask.sum_dim_intlist(-1, false, Kind::Float).clamp_min(1.0);
+    let d_to_q = (max_scores_d_to_q * &valid_doc_mask)
+        .sum_dim_intlist(-1, false, Kind::Float)
+        / doc_lengths;
 
     // Average the two directions to obtain a bidirectional MaxSim score.
     (q_to_d + d_to_q) / 2.0
