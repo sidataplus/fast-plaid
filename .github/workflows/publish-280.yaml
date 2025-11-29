@@ -12,6 +12,16 @@ jobs:
         python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
 
     steps:
+      - name: Free disk space (Ubuntu only)
+        if: startsWith(matrix.os, 'ubuntu')
+        shell: bash
+        run: |
+          echo "Before cleanup:" && df -h
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc || true
+          sudo docker system prune -af || true
+          sudo rm -rf /var/lib/docker || true
+          echo "After cleanup:" && df -h
+
       - name: Checkout code
         uses: actions/checkout@v4
 
