@@ -227,24 +227,26 @@ pub fn search_many(
     Ok(results)
 }
 
-/// Reduces token-level similarity scores into a final document score using the ColBERT MaxSim strategy.
+/// Reduces token-level similarity scores into a final document score using a bidirectional MaxSim strategy.
 ///
-/// This function implements the core reduction step of the ColBERT model's scoring mechanism.
-/// It first finds the maximum similarity score for each document token across all query tokens,
-/// effectively ignoring padded tokens in the document. Then, it sums these maximum scores to
-/// produce a single relevance score for each query-document pair in the batch.
+/// The traditional ColBERT MaxSim aggregates only **query→document** evidence: for each query
+/// token it keeps the maximum similarity over document tokens and sums the result. The
+/// bidirectional variant additionally captures **document→query** coverage by also taking, for
+/// each document token, the maximum similarity over query tokens (ignoring padded doc tokens)
+/// and combining the two directions with an average. This encourages mutual alignment instead of
+/// one-sided matching.
 ///
 /// # Arguments
 ///
-/// * `token_scores` - A 3D `Tensor` of shape `[batch_size, query_length, doc_length]`
+/// * `token_scores` - A 3D `Tensor` of shape `[batch_size, doc_length, query_length]`
 ///   containing the token-level similarity scores.
 /// * `attention_mask` - A 2D `Tensor` of shape `[batch_size, doc_length]` where `true`
 ///   indicates a valid token and `false` indicates a padded token.
 ///
 /// # Returns
 ///
-/// A 1D `Tensor` of shape `[batch_size]`, where each element is the final aggregated
-/// ColBERT score for a query-document pair.
+/// A 1D `Tensor` of shape `[batch_size]`, where each element is the final bidirectional
+/// MaxSim score for a query-document pair.
 pub fn colbert_score_reduce(token_scores: &Tensor, attention_mask: &Tensor) -> Tensor {
     let scores_shape = token_scores.size();
 
@@ -257,11 +259,18 @@ pub fn colbert_score_reduce(token_scores: &Tensor, attention_mask: &Tensor) -> T
     // Nullify scores at padded positions by filling them with a large negative number.
     let masked_scores = token_scores.masked_fill(&padding_mask, -9999.0);
 
-    // For each document token, find the maximum similarity score across all query tokens (MaxSim).
-    let (max_scores_per_token, _) = masked_scores.max_dim(1, false);
+    // Query → Document: for each query token, keep the best-matching document token.
+    let (max_scores_q_to_d, _) = masked_scores.max_dim(1, false);
+    let q_to_d = max_scores_q_to_d.sum_dim_intlist(-1, false, Kind::Float);
 
-    // Sum the MaxSim scores for all tokens in each document to get the final score.
-    max_scores_per_token.sum_dim_intlist(-1, false, Kind::Float)
+    // Document → Query: for each document token, keep the best-matching query token.
+    // Padded doc tokens were set to -9999.0 above; zero them out before aggregation.
+    let (max_scores_d_to_q, _) = masked_scores.max_dim(2, false);
+    let valid_doc_mask = attention_mask.to_kind(Kind::Float);
+    let d_to_q = (max_scores_d_to_q * valid_doc_mask).sum_dim_intlist(-1, false, Kind::Float);
+
+    // Average the two directions to obtain a bidirectional MaxSim score.
+    (q_to_d + d_to_q) / 2.0
 }
 
 /// Intersects two tensors of integer IDs, returning a new tensor with the common elements.
