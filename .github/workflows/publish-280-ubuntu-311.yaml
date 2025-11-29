@@ -1,0 +1,82 @@
+on:
+  workflow_dispatch:
+
+jobs:
+  build_wheels_ubuntu_311:
+    name: Build (clean) wheels for PyTorch 2.8.0 on ubuntu, Python 3.11
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Free disk space
+        shell: bash
+        run: |
+          before=$(df --output=avail -k / | tail -1)
+          echo "Before cleanup:" && df -h
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /opt/hostedtoolcache/go || true
+          sudo docker system prune -af || true
+          sudo rm -rf /var/lib/docker || true
+          sudo apt-get clean || true
+          sudo rm -rf /var/lib/apt/lists/* /tmp/* || true
+          after=$(df --output=avail -k / | tail -1)
+          reclaimed=$(( (after - before) / 1024 / 1024 ))
+          echo "After cleanup:" && df -h
+          echo "Reclaimed ~${reclaimed} GB on /"
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Prepare pyproject.toml
+        shell: bash
+        run: |
+          rm -f pyproject.toml
+          cp ci-280.toml pyproject.toml
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build wheel (cp311, manylinux x86_64)
+        uses: pypa/cibuildwheel@v2.23.3
+        env:
+          CIBW_BUILD: "cp311-*"
+          CIBW_SKIP: "*-manylinux_i686 *-musllinux_* *-win32 *-macosx_* *-win_amd64"
+          CIBW_BUILD_VERBOSITY: 1
+          LIBTORCH_BYPASS_VERSION_CHECK: 1
+          CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
+          CIBW_ENVIRONMENT: |
+            PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu/torch_stable.html"
+          CIBW_PIP_ARGS: --no-cache-dir
+          CIBW_BEFORE_BUILD: "pip install torch==2.8.0 numpy maturin delvewheel"
+          CIBW_REPAIR_WHEEL_COMMAND_LINUX: >
+            LD_LIBRARY_PATH=$(python -c 'import torch, os; print(os.path.join(os.path.dirname(torch.__file__), "lib"))'):$LD_LIBRARY_PATH auditwheel repair -w {dest_dir} {wheel} --exclude libtorch.so --exclude libtorch_cpu.so --exclude libtorch_python.so
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-ubuntu-py3.11
+          path: ./wheelhouse/*.whl
+
+  publish:
+    name: Publish ubuntu py3.11 wheel to PyPI (280)
+    needs: build_wheels_ubuntu_311
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+
+    steps:
+      - name: Download wheel
+        uses: actions/download-artifact@v4
+        with:
+          name: wheels-ubuntu-py3.11
+          path: dist
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@v1.12.4
+        with:
+          user: __token__
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          skip-existing: true
